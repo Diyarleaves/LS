@@ -5,20 +5,6 @@
 <meta name="color-scheme" content="light">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>نظام إدارة الإجازات — الديار العراقية للاستثمار</title>
-<!-- 🌟 أسطر تفعيل التطبيق والـ PWA 🌟 -->
-<link rel="manifest" href="manifest.json">
-<meta name="theme-color" content="#1773b6">
-<script>
-  if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-      navigator.serviceWorker.register('sw.js')
-        .then(reg => console.log('PWA active on /LS/', reg.scope))
-        .catch(err => console.error('PWA register failed', err));
-    });
-  }
-</script>
-<!-- 🌟 نهاية أسطر الـ PWA 🌟 -->
-
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
