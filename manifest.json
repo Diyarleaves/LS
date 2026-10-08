@@ -4,12 +4,12 @@
   "display": "standalone",
   "name": "Diyar Staff Leave Management System",
   "orientation": "any",
-  "scope": "/leave-system/",
+  "scope": "/LS/",
   "short_name": "Diyar Leaves",
-  "start_url": "/leave-system/",
+  "start_url": "/LS/",
   "theme_color": "#1773b6",
   "id": "https://github.io",
-  "description": "Diyar Staff Leave Management System is a digital platform designed to streamline and simplify leave management for Diyar employees. Enables staff to submit leave requests, check their leave balances, and track request status in one centralized system. Managers and HR can efficiently review, manage, and approve leave requests while maintaining accurate employee records",
+  "description": "Diyar Staff Leave Management System is a digital platform designed to streamline and simplify leave management for Diyar employees. Enables staff to submit leave requests, check their leave balances, and track request status in one centralized system.",
   "lang": "ar",
   "icons": [
     {
