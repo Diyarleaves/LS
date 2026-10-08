@@ -6,7 +6,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>نظام إدارة الإجازات — الديار العراقية للاستثمار</title>
 
-<!-- ربط ملف الـ Manifest بالمسار الصحيح للمستودع الجديد LS -->
+<!-- ربط المانيفست المحدث للمستودع الجديد -->
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#1773b6">
 
@@ -107,31 +107,29 @@
     #printArea{display:block !important;position:static;margin:0;padding:16px}
   }
 </style>
-<script>
-  const LOGO_SRC = "logo.png";
-</script>
 </head>
 <body>
   <div class="wrap">
     <div class="brand">
-      <img id="mainLogo" src="logo.png" alt="الشعار" style="height:54px; width:auto;">
-      <div class="bt">
+      <!-- إصلاح وسم الصورة ليعمل بمسار نسبي مباشر ومتوافق مع بنية PWA -->
+      <img id="mainLogo" src="./logo.png" alt="الشعار" style="height:54px; width:auto; display:inline-block; vertical-align:middle;">
+      <div class="bt" style="display:inline-block; vertical-align:middle; margin-inline-start:12px;">
         <b>نظام إدارة الإجازات</b>
         <span>الديار العراقية للاستثمار</span>
       </div>
     </div>
     <div class="card accent-blue">
       <h2>نظام إدارة الإجازات المطور</h2>
-      <p>التطبيق جاهز وسريع ومحفوظ في الذاكرة المؤقتة للهاتف بنجاح.</p>
+      <p>التطبيق يعمل الآن بكامل طاقته ومحفوظ في الذاكرة المؤقتة للهاتف بنجاح.</p>
     </div>
   </div>
 
-  <!-- تفعيل الـ Service Worker تلقائياً للمستودع الجديد -->
+  <!-- سكربت تفعيل التخزين المؤقت تلقائياً للمستودع الجديد LS -->
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
-        navigator.serviceWorker.register('sw.js')
-          .then(reg => console.log('PWA Active on /LS/', reg.scope))
+        navigator.serviceWorker.register('./sw.js')
+          .then(reg => console.log('PWA Connected to /LS/', reg.scope))
           .catch(err => console.error('PWA Activation Failed!', err));
       });
     }
