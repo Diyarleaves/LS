@@ -1105,6 +1105,15 @@ async function hrSettings(){
     <button onclick="recalcAnnualBalances()">${lang==='en'?'Recalculate Now':'إعادة الاحتساب الآن'}</button>
     <div id="rc_msg" class="msg"></div>
   </div>
+  ${session.role==='admin' ? `<div class="card accent-red" id="rs_card">
+    <h2 style="font-size:1rem">⚠️ ${lang==='en'?'Reset System (before launch)':'تصفير النظام (قبل الإطلاق الرسمي)'}</h2>
+    <p style="font-size:.8rem;opacity:.7">${lang==='en'
+      ? 'Deletes ALL leave requests and announcements, sets ALL balances to 0 and restarts monthly accrual from today. Employees, login data, photos and leave types are kept. A backup is taken first so you can undo it.'
+      : 'يحذف جميع طلبات الإجازات والإعلانات، ويصفّر جميع الأرصدة، ويبدأ الاستحقاق الشهري من اليوم. تبقى بيانات الموظفين وكلمات الدخول والصور وأنواع الإجازات كما هي. تُؤخذ نسخة احتياطية قبل التنفيذ لتتمكن من التراجع.'}</p>
+    <button class="reject" onclick="resetSystem()">${lang==='en'?'Reset System':'تصفير النظام'}</button>
+    <div id="rs_undo" style="margin-top:12px;font-size:.85rem"></div>
+    <div id="rs_msg" class="msg"></div>
+  </div>` : ''}
   <div class="card accent-red">
     <h2 style="font-size:1rem">${lang==='en'?'Year-End Balance Adjustment':'تصفير / تعديل الأرصدة نهاية العام'}</h2>
     <p style="font-size:.8rem;opacity:.7">${lang==='en'?'Applies to all active employees, or to one employee you choose below. This cannot be undone automatically.':'يُطبَّق على جميع الموظفين النشطين، أو على موظف واحد تختاره أدناه. لا يمكن التراجع عنه تلقائياً.'}</p>
@@ -1134,6 +1143,7 @@ async function hrSettings(){
     <button class="reject" onclick="runArchive()">${lang==='en'?'Delete':'حذف'}</button>
     <div id="arch_msg" class="msg"></div>
   </div>`;
+  loadUndoInfo();
 }
 async function runArchive(){
   const before = document.getElementById('arch_before').value;
@@ -1200,6 +1210,71 @@ async function recalcAnnualBalances(){
   }catch(e){
     msg.className='msg err'; msg.textContent = (lang==='en'?'Error: ':'خطأ: ')+(e.message||e);
   }
+}
+async function fetchAllRows(table, cols){
+  let all=[], from=0;
+  for(;;){
+    const {data, error} = await sb.from(table).select(cols||'*').range(from, from+999);
+    if(error) throw error;
+    all = all.concat(data||[]);
+    if(!data || data.length<1000) break;
+    from += 1000;
+  }
+  return all;
+}
+async function loadUndoInfo(){
+  const el = document.getElementById('rs_undo'); if(!el) return;
+  const {data} = await sb.from('system_backups').select('id, created_at, label').order('created_at',{ascending:false}).limit(1);
+  if(!data || !data.length){ el.innerHTML=''; return; }
+  const d = new Date(data[0].created_at);
+  const stamp = d.toLocaleDateString('ar-IQ')+' — '+d.toLocaleTimeString('ar-IQ',{hour:'2-digit',minute:'2-digit'});
+  el.innerHTML = `${lang==='en'?'Last backup':'آخر نسخة احتياطية'}: <b>${stamp}</b> <button class="ghost" onclick="undoReset('${data[0].id}')">↩ ${lang==='en'?'Undo (restore this backup)':'تراجع (استعادة هذه النسخة)'}</button>`;
+}
+async function resetSystem(){
+  if(session.role!=='admin') return;
+  const msg = document.getElementById('rs_msg'); msg.className='msg'; msg.textContent='';
+  const word = lang==='en' ? 'RESET' : 'تصفير';
+  const v = prompt((lang==='en'?'This deletes all requests and zeroes all balances. Type ':'سيتم حذف كل الطلبات وتصفير كل الأرصدة. للتأكيد اكتب كلمة: ')+word);
+  if((v||'').trim() !== word) return;
+  try{
+    msg.textContent = lang==='en'?'Taking backup...':'جارٍ أخذ نسخة احتياطية...';
+    const [reqs, bals, anns, emps] = await Promise.all([
+      fetchAllRows('leave_requests'), fetchAllRows('leave_balances'),
+      fetchAllRows('announcements'), fetchAllRows('employees','id,last_accrual')]);
+    const {error: bErr} = await sb.from('system_backups').insert({label:'before-reset', created_by: session.name||'', data:{leave_requests:reqs, leave_balances:bals, announcements:anns, employees_accrual:emps}});
+    if(bErr){ msg.className='msg err'; msg.textContent=(lang==='en'?'Backup failed, nothing was changed: ':'فشل أخذ النسخة الاحتياطية، لم يتغير شيء: ')+bErr.message+(lang==='en'?' (run alter_v10.sql first)':' (نفّذ alter_v10.sql أولاً)'); return; }
+    const now = new Date().toISOString(), today = now.slice(0,10);
+    msg.textContent = lang==='en'?'Resetting...':'جارٍ التصفير...';
+    const r1 = await sb.from('leave_requests').delete().not('id','is',null);
+    const r2 = await sb.from('announcements').delete().not('id','is',null);
+    const r3 = await sb.from('leave_balances').update({balance:0, updated_at:now}).not('id','is',null);
+    const r4 = await sb.from('employees').update({last_accrual:today}).not('id','is',null);
+    const err = [r1,r2,r3,r4].find(x=>x.error);
+    if(err){ msg.className='msg err'; msg.textContent=(lang==='en'?'Error: ':'خطأ: ')+err.error.message; return; }
+    // الاحتفاظ بآخر 5 نسخ فقط
+    const {data: old} = await sb.from('system_backups').select('id').order('created_at',{ascending:false});
+    if(old && old.length>5) await sb.from('system_backups').delete().in('id', old.slice(5).map(x=>x.id));
+    msg.className='msg ok'; msg.textContent = lang==='en'?'System reset. You can undo from the button below.':'تم تصفير النظام. يمكنك التراجع من الزر الظاهر أدناه.';
+    loadUndoInfo();
+  }catch(e){ msg.className='msg err'; msg.textContent=(lang==='en'?'Error: ':'خطأ: ')+(e.message||e); }
+}
+async function undoReset(backupId){
+  if(session.role!=='admin') return;
+  if(!confirm(lang==='en'?'Restore the system to the state before the reset? Anything added since will be replaced.':'استعادة النظام إلى حالته قبل التصفير؟ سيُستبدل أي شيء أُضيف بعد التصفير.')) return;
+  const msg = document.getElementById('rs_msg'); msg.className='msg'; msg.textContent = lang==='en'?'Restoring...':'جارٍ الاستعادة...';
+  try{
+    const {data: bk, error} = await sb.from('system_backups').select('data').eq('id', backupId).single();
+    if(error || !bk) throw (error||new Error('not found'));
+    const d = bk.data||{};
+    let r = await sb.from('leave_requests').delete().not('id','is',null); if(r.error) throw r.error;
+    r = await sb.from('announcements').delete().not('id','is',null); if(r.error) throw r.error;
+    const chunk=(arr,n)=>{const o=[];for(let i=0;i<arr.length;i+=n)o.push(arr.slice(i,i+n));return o;};
+    for(const c of chunk(d.leave_requests||[],25)){ r = await sb.from('leave_requests').insert(c); if(r.error) throw r.error; }
+    for(const c of chunk(d.announcements||[],100)){ r = await sb.from('announcements').insert(c); if(r.error) throw r.error; }
+    for(const c of chunk(d.leave_balances||[],200)){ r = await sb.from('leave_balances').upsert(c,{onConflict:'id'}); if(r.error) throw r.error; }
+    for(const c of chunk(d.employees_accrual||[],200)){ r = await sb.from('employees').upsert(c,{onConflict:'id'}); if(r.error) throw r.error; }
+    msg.className='msg ok'; msg.textContent = lang==='en'?'Restored successfully.':'تمت الاستعادة بنجاح.';
+  }catch(e){ msg.className='msg err'; msg.textContent=(lang==='en'?'Restore error (the backup is still kept, retry): ':'خطأ في الاستعادة (النسخة محفوظة، أعد المحاولة): ')+(e.message||e); }
 }
 async function runYearEnd(){
   const typeId = document.getElementById('ry_type').value;
