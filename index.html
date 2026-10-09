@@ -234,6 +234,49 @@ function fmtBal(n){
   const v = Number(n)||0;
   return Number.isInteger(v) ? String(v) : String(Math.round(v*10)/10);
 }
+function avatarMini(name, photo, size){
+  size = size||28;
+  const st = `width:${size}px;height:${size}px;border-radius:50%;flex:none;`;
+  return photo
+    ? `<img src="${photo}" style="${st}object-fit:cover;border:1.5px solid var(--blue)">`
+    : `<span style="${st}background:var(--blue);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:${Math.round(size*.46)}px;font-weight:700">${esc((name||'?').trim().charAt(0))}</span>`;
+}
+function personChip(role, name, photo){
+  if(!name) return '';
+  return `<div style="display:flex;align-items:center;gap:6px;margin:3px 0">${avatarMini(name,photo)}<span style="line-height:1.2"><span style="font-size:.64rem;opacity:.6;display:block">${role}</span>${esc(name)}</span></div>`;
+}
+async function photoLookup(rows){
+  const ids=new Set(), names=new Set();
+  (rows||[]).forEach(r=>{
+    if(r.employee_id) ids.add(r.employee_id);
+    if(r.substitute_id) ids.add(r.substitute_id);
+    const e=r.employees||{};
+    if(e.manager_id) ids.add(e.manager_id); else if(e.manager_name && e.manager_name.trim()) names.add(e.manager_name.trim());
+  });
+  const byId={}, byName={};
+  try{
+    if(ids.size){ const {data}=await sb.from('employees').select('id, full_name, photo_data').in('id',[...ids]); (data||[]).forEach(x=>{byId[x.id]=x;}); }
+    if(names.size){ const {data}=await sb.from('employees').select('id, full_name, photo_data').in('full_name',[...names]); (data||[]).forEach(x=>{byName[(x.full_name||'').trim()]=x;}); }
+  }catch(e){}
+  return {byId,byName};
+}
+function requestPeople(r, pl, opts){
+  opts = opts||{};
+  const e=r.employees||{};
+  const req=pl.byId[r.employee_id]||{};
+  const sub=r.substitute_id?pl.byId[r.substitute_id]:null;
+  const mgr = e.manager_id ? pl.byId[e.manager_id] : (e.manager_name ? pl.byName[e.manager_name.trim()] : null);
+  const mgrName = mgr ? mgr.full_name : (e.manager_name||'');
+  const L = lang==='en';
+  return personChip(L?'Requester':'مقدّم الطلب', e.full_name||req.full_name, req.photo_data)
+    + (r.substitute_name ? personChip(L?'Substitute':'البديل', (sub&&sub.full_name)||r.substitute_name, sub&&sub.photo_data) : '')
+    + (opts.noManager ? '' : personChip(L?'Manager':'المدير', mgrName, mgr&&mgr.photo_data));
+}
+function attLink(r, full){
+  return r.attachment_data
+    ? `<a class="link-btn" href="${r.attachment_data}" download="${esc(r.attachment_name||'attachment')}" target="_blank">📎 ${full?(esc(r.attachment_name||'')||(lang==='en'?'Download':'تنزيل')):(lang==='en'?'View / Download':'عرض / تنزيل')}</a>`
+    : '-';
+}
 function subLine(r){
   return r && r.substitute_name
     ? `<div style="font-size:.72rem;opacity:.7;margin-top:2px">↪ ${lang==='en'?'Substitute':'البديل'}: ${esc(r.substitute_name)}</div>`
@@ -334,6 +377,14 @@ function subscribeOwnRequestUpdates(){
       .on('postgres_changes', {event:'UPDATE', schema:'public', table:'leave_requests', filter:'employee_id=eq.'+session.id}, payload=>{
         const row = payload.new;
         if(!row) return;
+        if(row.status === 'pending_manager' || row.status === 'pending_hr'){
+          if(row.substitute_id){
+            playNotifySound();
+            showToast(lang==='en' ? 'Your substitute approved — request moved on' : 'وافق البديل على طلبك — انتقل الطلب للمرحلة التالية');
+            render();
+          }
+          return;
+        }
         if(row.status === 'approved' || row.status === 'rejected'){
           playNotifySound();
           const msg = row.status === 'approved'
@@ -385,6 +436,16 @@ function subscribeRequestNotifications(){
         const row = payload.new;
         if(!row || !session) return;
 
+        // The substitute is notified first.
+        if(row.status === 'pending_substitute'){
+          if(row.substitute_id === session.id){
+            playNotifySound();
+            showToast(lang==='en' ? 'A colleague named you as substitute — approval needed' : 'زميل اختارك بديلاً له — بانتظار موافقتك');
+            render();
+          }
+          return;
+        }
+
         // New requests: notify only the manager who is actually assigned to the employee.
         if(row.status === 'pending_manager' && session.role === 'manager'){
           const {data: emp} = await sb.from('employees')
@@ -406,9 +467,27 @@ function subscribeRequestNotifications(){
           renderHR();
         }
       })
-      .on('postgres_changes', {event:'UPDATE', schema:'public', table:'leave_requests'}, payload=>{
+      .on('postgres_changes', {event:'UPDATE', schema:'public', table:'leave_requests'}, async payload=>{
         const row = payload.new;
         if(!row || !session) return;
+
+        // Substitute approved -> manager (or HR) is notified now.
+        if(row.status === 'pending_manager' && session.role === 'manager'){
+          const {data: emp} = await sb.from('employees').select('manager_id, manager_name').eq('id', row.employee_id).maybeSingle();
+          const isMine = emp && (emp.manager_id === session.id || (emp.manager_name && emp.manager_name.trim() === (session.name||'').trim()));
+          if(isMine){
+            playNotifySound();
+            showToast(lang==='en' ? 'New leave request awaiting your approval' : 'طلب إجازة جديد بانتظار موافقتك');
+            renderManager();
+          }
+          return;
+        }
+        if(row.status === 'pending_hr' && (session.role === 'hr' || session.role === 'admin')){
+          playNotifySound();
+          showToast(lang==='en' ? 'Manager leave request needs processing' : 'طلب إجازة المدير يحتاج إلى معالجة');
+          renderHR();
+          return;
+        }
 
         // HR and System Admin are notified when a manager approves/rejects a request.
         if((session.role === 'hr' || session.role === 'admin') &&
@@ -571,6 +650,8 @@ function roleLabel(r){
   return r==='hr'?'HR':r==='manager'?'مدير':r==='admin'?'مسؤول النظام':'موظف';
 }
 function badge(s){
+  if(s==='pending_substitute') return `<span class="badge b-pending">${lang==='en'?'Pending substitute':'بانتظار البديل'}</span>`;
+  if(s==='pending_hr') return `<span class="badge b-pending">${lang==='en'?'Pending HR':'بانتظار HR'}</span>`;
   if(s==='approved') return `<span class="badge b-approved">${t('approved')}</span>`;
   if(s==='rejected') return `<span class="badge b-rejected">${t('rejected')}</span>`;
   return `<span class="badge b-pending">${t('pending')}</span>`;
@@ -657,7 +738,7 @@ async function leaveRequestPanel(){
   // قائمة أنواع الإجازة المتاحة للطلب مبنية فقط على ما لدى الموظف فعلياً رصيد له
   // (يضمن تلقائياً استبعاد الأنواع الخاصة بجنس آخر أو الأنواع المُلغاة)
   let typeOptions = (bals||[]).map(b=>`<option value="${b.leave_type_id}">${tn(b.leave_types)}</option>`).join('');
-  let reqRows = (reqs||[]).map(r=>`<tr><td>${tn(r.leave_types)}${subLine(r)}</td><td>${r.start_date}</td><td>${r.end_date}</td><td>${r.days_count}</td><td>${badge(r.status)}${r.manager_note?`<div style="font-size:.72rem;opacity:.65;margin-top:2px">💬 ${esc(r.manager_note)}</div>`:''}</td><td>${r.attachment_data ? `<a class="link-btn" href="${r.attachment_data}" download="${esc(r.attachment_name||'attachment')}" target="_blank">📎</a>` : '-'}</td></tr>`).join('') || `<tr><td colspan="6">${t('no_requests')}</td></tr>`;
+  let reqRows = (reqs||[]).map(r=>`<tr><td>${tn(r.leave_types)}${subLine(r)}</td><td>${r.start_date}</td><td>${r.end_date}</td><td>${r.days_count}</td><td>${badge(r.status)}${r.substitute_note?`<div style="font-size:.72rem;opacity:.65;margin-top:2px">↪💬 ${esc(r.substitute_note)}</div>`:''}${r.manager_note?`<div style="font-size:.72rem;opacity:.65;margin-top:2px">💬 ${esc(r.manager_note)}</div>`:''}</td><td>${r.attachment_data ? `<a class="link-btn" href="${r.attachment_data}" download="${esc(r.attachment_name||'attachment')}" target="_blank">📎</a>` : '-'}</td></tr>`).join('') || `<tr><td colspan="6">${t('no_requests')}</td></tr>`;
 
   return `
     <div class="card"><h2 style="font-size:1rem">${t('leave_balance')}</h2><div class="balgrid">${balHtml}</div></div>
@@ -679,13 +760,49 @@ async function leaveRequestPanel(){
     </div>`;
 }
 
+async function substitutePanel(){
+  if(!session) return '';
+  const {data: reqs, error} = await sb.from('leave_requests')
+    .select('*, employees!leave_requests_employee_id_fkey(full_name, manager_id, manager_name), leave_types(name_ar,name_en)')
+    .eq('status','pending_substitute').eq('substitute_id', session.id).order('requested_at',{ascending:true});
+  if(error || !reqs || !reqs.length) return '';
+  const pl = await photoLookup(reqs);
+  const tn = x => x ? (lang==='en' ? (x.name_en || x.name_ar) : x.name_ar) : '-';
+  const rows = reqs.map(r=>`<tr>
+    <td>${requestPeople(r, pl)}</td><td>${tn(r.leave_types)}</td>
+    <td>${r.start_date} → ${r.end_date}</td><td>${r.days_count}</td>
+    <td style="min-width:150px"><textarea id="snote_${r.id}" rows="1" placeholder="${lang==='en'?'Comment (optional)':'تعليق (اختياري)'}" style="width:100%;font-size:.8rem;padding:6px"></textarea></td>
+    <td style="white-space:nowrap"><button onclick="decideSub('${r.id}',true)">${lang==='en'?'Accept':'موافقة'}</button>
+      <button class="reject" onclick="decideSub('${r.id}',false)">${lang==='en'?'Decline':'اعتذار'}</button></td></tr>`).join('');
+  return `<div class="card accent-gold"><h2 style="font-size:1rem">${lang==='en'?'Requests naming you as substitute':'طلبات اختارتك بديلاً'}</h2>
+    <p style="font-size:.8rem;opacity:.7">${lang==='en'?'Your approval is required before the request goes to the manager.':'موافقتك مطلوبة قبل انتقال الطلب إلى المدير.'}</p>
+    <table><tr><th>${lang==='en'?'People':'الأشخاص'}</th><th>${t('type_col')}</th><th>${lang==='en'?'Period':'الفترة'}</th><th>${t('days_col')}</th><th>${lang==='en'?'Comment':'تعليق'}</th><th></th></tr>${rows}</table></div>`;
+}
+async function decideSub(reqId, ok){
+  const noteEl = document.getElementById('snote_'+reqId);
+  const note = noteEl ? noteEl.value.trim() : '';
+  const {data: req} = await sb.from('leave_requests')
+    .select('*, employees!leave_requests_employee_id_fkey(role, manager_id, manager_name)').eq('id',reqId).single();
+  if(!req || req.status !== 'pending_substitute' || req.substitute_id !== session.id) return render();
+  const e = req.employees || {};
+  const hasHigher = !!(e.manager_id || (e.manager_name && e.manager_name.trim()));
+  const next = (e.role === 'manager' && !hasHigher) ? 'pending_hr' : 'pending_manager';
+  const upd = ok
+    ? {status: next, substitute_note: note||null, substitute_decided_at: new Date().toISOString()}
+    : {status: 'rejected', substitute_note: note||null, substitute_decided_at: new Date().toISOString(), decided_at: new Date().toISOString(), hr_notified:false};
+  const {error} = await sb.from('leave_requests').update(upd).eq('id',reqId);
+  if(error){ showToast((lang==='en'?'Error: ':'خطأ: ')+error.message); return; }
+  render();
+}
+
 async function renderEmployee(){
   app.innerHTML = topbar(t('emp_dash')) + `<div id="body">...</div>`;
   subscribeOwnRequestUpdates();
   const body = document.getElementById('body');
   const pc = await profileCard();
   const panel = await leaveRequestPanel();
-  body.innerHTML = pc + panel;
+  const sp = await substitutePanel();
+  body.innerHTML = pc + sp + panel;
 }
 
 async function submitRequest(){
@@ -731,9 +848,11 @@ async function submitRequest(){
 
   // A manager may also submit leave. If there is no higher manager, route the request to HR/System Admin.
   const hasHigherManager = !!(myEmp && (myEmp.manager_id || (myEmp.manager_name && myEmp.manager_name.trim())));
-  const requestStatus = (session.role === 'manager' && !hasHigherManager) ? 'pending_hr' : 'pending_manager';
   const subSel = document.getElementById('rq_sub');
   const substituteId = subSel ? subSel.value : '';
+  const nextAfterSub = (session.role === 'manager' && !hasHigherManager) ? 'pending_hr' : 'pending_manager';
+  // عند اختيار بديل يذهب الطلب إليه أولاً، ثم المدير، ثم HR
+  const requestStatus = substituteId ? 'pending_substitute' : nextAfterSub;
   const substituteName = substituteId ? subSel.selectedOptions[0].textContent : '';
   const payload = {
     employee_id: session.id, leave_type_id: type_id, start_date: start, end_date: end,
@@ -746,7 +865,11 @@ async function submitRequest(){
   if(error){ msg.textContent=(lang==='en'?'Error: ':'خطأ: ')+error.message; msg.className='msg err'; return; }
   const typeName = document.getElementById('rq_type').selectedOptions[0].textContent;
   let noteHtml = '';
-  if(requestStatus === 'pending_hr') {
+  if(requestStatus === 'pending_substitute') {
+    noteHtml += `<div style="margin-top:10px" class="msg ok">${lang==='en'
+      ? 'Your request was sent to your substitute ('+esc(substituteName)+') for approval first, then it moves to your manager and HR.'
+      : 'تم إرسال طلبك إلى البديل ('+esc(substituteName)+') للموافقة أولاً، ثم ينتقل إلى المدير ثم HR.'}</div>`;
+  } else if(requestStatus === 'pending_hr') {
     noteHtml += `<div style="margin-top:10px" class="msg ok">${lang==='en'
       ? 'Your request was recorded and sent to HR/System Admin because no higher manager is assigned to you.'
       : 'تم تسجيل طلبك وإحالته إلى HR/مسؤول النظام لعدم وجود مدير أعلى مرتبط بك.'}</div>`;
@@ -781,7 +904,7 @@ async function submitRequest(){
       ? 'No manager email is set for you — ask HR to add it to get an email-notify button.'
       : 'لا يوجد بريد إلكتروني مسجّل لمديرك — اطلب من HR إضافته حتى يظهر زر إشعار البريد.'}</div>`;
   }
-  if(whatsappEnabled()){
+  if(requestStatus !== 'pending_substitute' && whatsappEnabled()){
     if(myEmp && myEmp.manager_phone){
       const waText = encodeURIComponent(
         (lang==='en'?'New leave request awaiting your approval\n\n':'طلب إجازة جديد بانتظار موافقتكم\n\n') +
@@ -845,10 +968,11 @@ async function renderManager(){
     (r.employees.manager_name && r.employees.manager_name.trim() === (session.name||'').trim())
   ));
 
+  const plM = await photoLookup(mine);
   let rows = mine.map(r=>`<tr>
-      <td>${r.employees.full_name}${subLine(r)}</td><td>${r.leave_types.name_ar}</td>
+      <td>${requestPeople(r, plM, {noManager:true})}${r.substitute_name?`<div style="font-size:.7rem;color:var(--green,#1a7f4b)">✓ ${lang==='en'?'Substitute approved':'وافق البديل'}${r.substitute_note?': '+esc(r.substitute_note):''}</div>`:''}</td><td>${r.leave_types.name_ar}</td>
       <td>${r.start_date} → ${r.end_date}</td><td>${r.days_count}</td>
-      <td>${r.attachment_data ? `<a class="link-btn" href="${r.attachment_data}" download="${esc(r.attachment_name||'attachment')}" target="_blank">📎 ${lang==='en'?'View':'عرض'}</a>` : '-'}</td>
+      <td>${attLink(r)}</td>
       <td style="min-width:160px"><textarea id="note_${r.id}" rows="1" placeholder="${lang==='en'?'Comment (optional)':'تعليق (اختياري)'}" style="width:100%;font-size:.8rem;padding:6px"></textarea></td>
       <td style="white-space:nowrap"><button onclick="decide('${r.id}','approved')">${lang==='en'?'Approve':'موافقة'}</button>
           <button class="reject" onclick="decide('${r.id}','rejected')">${lang==='en'?'Reject':'رفض'}</button></td>
@@ -856,7 +980,8 @@ async function renderManager(){
 
   const pc = await profileCard();
   const ownPanel = await leaveRequestPanel();
-  body.innerHTML = pc + ownPanel + `<div class="card"><h2 style="font-size:1rem">${lang==='en'?'Requests awaiting your approval':'طلبات بانتظار موافقتك'}</h2>
+  const sp = await substitutePanel();
+  body.innerHTML = pc + sp + ownPanel + `<div class="card"><h2 style="font-size:1rem">${lang==='en'?'Requests awaiting your approval':'طلبات بانتظار موافقتك'}</h2>
     <table><tr><th>${lang==='en'?'Employee':'الموظف'}</th><th>${t('type_col')}</th><th>${lang==='en'?'Period':'الفترة'}</th><th>${t('days_col')}</th><th>${lang==='en'?'Attachment':'المرفق'}</th><th>${lang==='en'?'Comment':'تعليق'}</th><th></th></tr>${rows}</table></div>`;
 }
 
@@ -905,7 +1030,7 @@ async function renderHR(){
   if(tab==='settings') return hrSettings();
   if(tab==='notices') return hrNotices();
 }
-async function hrMe(){ const pc = await profileCard(); const panel = await leaveRequestPanel(); document.getElementById('body').innerHTML = pc + panel; }
+async function hrMe(){ const pc = await profileCard(); const sp = await substitutePanel(); const panel = await leaveRequestPanel(); document.getElementById('body').innerHTML = pc + sp + panel; }
 function startEdit(id){ editingEmpId = id; tab='edit'; renderHR(); }
 function hrTab(tb){ tab=tb; renderHR(); }
 
@@ -1159,7 +1284,7 @@ async function runReport(){
     type: tn(r.leave_types),
     from: r.start_date, to: r.end_date, days: r.days_count,
     remaining: balMap[r.employee_id+'_'+r.leave_types.id] != null ? fmtBal(balMap[r.employee_id+'_'+r.leave_types.id]) : '-',
-    status: r.status==='approved' ? t('approved') : r.status==='rejected' ? t('rejected') : t('pending')
+    status: r.status==='approved' ? t('approved') : r.status==='rejected' ? t('rejected') : r.status==='pending_substitute' ? (lang==='en'?'Pending substitute':'بانتظار البديل') : r.status==='pending_hr' ? (lang==='en'?'Pending HR':'بانتظار HR') : t('pending')
   }));
 
   const distinctEmp = new Set(rows.map(r=>r.employee_id)).size;
@@ -1227,27 +1352,29 @@ async function saveSettings(){
 async function hrNotify(){
   const body = document.getElementById('body');
   const {data: pending} = await sb.from('leave_requests')
-    .select('*, employees!leave_requests_employee_id_fkey(full_name), leave_types(name_ar,name_en)')
+    .select('*, employees!leave_requests_employee_id_fkey(full_name, manager_id, manager_name), leave_types(name_ar,name_en)')
     .eq('status','pending_hr').order('requested_at',{ascending:true}).limit(50);
   const {data: approved} = await sb.from('leave_requests')
-    .select('*, employees!leave_requests_employee_id_fkey(full_name), leave_types(name_ar,name_en)')
+    .select('*, employees!leave_requests_employee_id_fkey(full_name, manager_id, manager_name), leave_types(name_ar,name_en)')
     .eq('status','approved').eq('hr_notified', true).order('decided_at',{ascending:false}).limit(30);
   const tn = x => x ? (lang==='en' ? (x.name_en || x.name_ar) : x.name_ar) : '-';
-  const pendingRows = (pending||[]).map(r=>`<tr><td>${r.employees.full_name}${subLine(r)}</td><td>${tn(r.leave_types)}</td>
-    <td>${r.start_date} → ${r.end_date}</td><td>${r.days_count}</td>
+  const plH = await photoLookup([...(pending||[]), ...(approved||[])]);
+  const sp = await substitutePanel();
+  const pendingRows = (pending||[]).map(r=>`<tr><td>${requestPeople(r, plH, {noManager:true})}</td><td>${tn(r.leave_types)}</td>
+    <td>${r.start_date} → ${r.end_date}</td><td>${r.days_count}</td><td>${attLink(r)}</td>
     <td style="white-space:nowrap"><button onclick="decide('${r.id}','approved')">${lang==='en'?'Approve':'موافقة'}</button>
-      <button class="reject" onclick="decide('${r.id}','rejected')">${lang==='en'?'Reject':'رفض'}</button></td></tr>`).join('') || `<tr><td colspan="5">${lang==='en'?'No manager requests awaiting processing':'لا توجد طلبات لمديرين بانتظار المعالجة'}</td></tr>`;
-  const rows = (approved||[]).map(r=>`<tr><td>${r.employees.full_name}${subLine(r)}</td><td>${tn(r.leave_types)}</td>
-    <td>${r.start_date} → ${r.end_date}</td><td>${r.days_count}</td>
+      <button class="reject" onclick="decide('${r.id}','rejected')">${lang==='en'?'Reject':'رفض'}</button></td></tr>`).join('') || `<tr><td colspan="6">${lang==='en'?'No manager requests awaiting processing':'لا توجد طلبات لمديرين بانتظار المعالجة'}</td></tr>`;
+  const rows = (approved||[]).map(r=>`<tr><td>${requestPeople(r, plH)}</td><td>${tn(r.leave_types)}</td>
+    <td>${r.start_date} → ${r.end_date}</td><td>${r.days_count}</td><td>${attLink(r)}</td>
     <td style="white-space:nowrap">
       <button class="ghost" onclick="printLeaveCertificate('${r.id}')">🖨️ ${lang==='en'?'Print Form':'طباعة نموذج'}</button>
       <button class="ghost" onclick="ack('${r.id}')">${lang==='en'?'Acknowledge':'تم الاطلاع'}</button>
-    </td></tr>`).join('') || `<tr><td colspan="5">${lang==='en'?'No new notices':'لا توجد إشعارات جديدة'}</td></tr>`;
-  body.innerHTML = `<div class="card accent-gold"><h2 style="font-size:1rem">${lang==='en'?'Manager requests without a higher manager':'طلبات المديرين الذين لا يوجد لهم مدير أعلى'}</h2>
+    </td></tr>`).join('') || `<tr><td colspan="6">${lang==='en'?'No new notices':'لا توجد إشعارات جديدة'}</td></tr>`;
+  body.innerHTML = sp + `<div class="card accent-gold"><h2 style="font-size:1rem">${lang==='en'?'Manager requests without a higher manager':'طلبات المديرين الذين لا يوجد لهم مدير أعلى'}</h2>
     <p style="font-size:.8rem;opacity:.7">${lang==='en'?'These requests are routed to HR/System Admin for recording and decision.':'هذه الطلبات تُحال إلى HR/مسؤول النظام للتسجيل واتخاذ القرار.'}</p>
-    <table><tr><th>${lang==='en'?'Employee':'الموظف'}</th><th>${t('type_col')}</th><th>${lang==='en'?'Period':'الفترة'}</th><th>${t('days_col')}</th><th></th></tr>${pendingRows}</table></div>
+    <table><tr><th>${lang==='en'?'Employee':'الموظف'}</th><th>${t('type_col')}</th><th>${lang==='en'?'Period':'الفترة'}</th><th>${t('days_col')}</th><th>${lang==='en'?'Attachment':'المرفق'}</th><th></th></tr>${pendingRows}</table></div>
   <div class="card"><h2 style="font-size:1rem">${lang==='en'?'Approved leaves awaiting HR processing':'إجازات معتمدة تحتاج معالجة HR'}</h2>
-    <table><tr><th>${lang==='en'?'Employee':'الموظف'}</th><th>${t('type_col')}</th><th>${lang==='en'?'Period':'الفترة'}</th><th>${t('days_col')}</th><th></th></tr>${rows}</table></div>`;
+    <table><tr><th>${lang==='en'?'Employee':'الموظف'}</th><th>${t('type_col')}</th><th>${lang==='en'?'Period':'الفترة'}</th><th>${t('days_col')}</th><th>${lang==='en'?'Attachment':'المرفق'}</th><th></th></tr>${rows}</table></div>`;
 }
 
 async function printLeaveCertificate(reqId){
@@ -1276,6 +1403,7 @@ async function printLeaveCertificate(reqId){
       <tr><th>${t('days_col')}</th><td>${r.days_count}</td></tr>
       <tr><th>${lang==='en'?'Reason':'السبب'}</th><td>${r.reason||'-'}</td></tr>
       <tr><th>${lang==='en'?'Substitute Employee':'الموظف البديل'}</th><td>${esc(r.substitute_name)||'-'}</td></tr>
+      ${r.substitute_name?`<tr><th>${lang==='en'?'Substitute Approval':'موافقة البديل'}</th><td>${(r.substitute_decided_at||'').slice(0,10)||'-'}${r.substitute_note?' — '+esc(r.substitute_note):''}</td></tr>`:''}
       <tr><th>${lang==='en'?'Approval Date':'تاريخ الموافقة'}</th><td>${(r.decided_at||'').slice(0,10)||'-'}</td></tr>
       <tr><th>${lang==='en'?'Manager Comment':'تعليق المدير'}</th><td>${r.manager_note||'-'}</td></tr>
       <tr><th>${lang==='en'?'Printed on':'تاريخ الطباعة'}</th><td>${today}</td></tr>
@@ -1296,7 +1424,7 @@ async function hrEmployees(){
     <td>${e.department||'-'}</td><td>${e.status==='active'?(lang==='en'?'Active':'نشط'):(lang==='en'?'Terminated':'منتهي الخدمة')}</td>
     <td style="white-space:nowrap">
       <button class="ghost" onclick="startEdit('${e.id}')">${t('edit')}</button>
-      ${e.status==='active' ? `<button class="ghost" onclick="terminate('${e.id}')">${lang==='en'?'Terminate':'إنهاء خدمة'}</button>` : ''}
+      ${e.status==='active' ? `<button class="ghost" onclick="terminate('${e.id}')">${lang==='en'?'Terminate':'إنهاء خدمة'}</button>` : `<button onclick="reactivate('${e.id}')">${lang==='en'?'Reinstate':'إعادة تفعيل'}</button>`}
     </td></tr>`).join('');
   body.innerHTML = `<div class="card"><h2 style="font-size:1rem">${(lang==='en'?'Employee List':'قائمة الموظفين')} (${(emps||[]).length})</h2>
     <table><tr><th>${t('emp_code')}</th><th>${lang==='en'?'Name':'الاسم'}</th><th>${t('job_title')}</th><th>${t('role_label')}</th><th>${t('department')}</th><th>${t('status_col')}</th><th></th></tr>${rows}</table></div>`;
@@ -1304,6 +1432,13 @@ async function hrEmployees(){
 async function terminate(id){
   if(!confirm(lang==='en'?'Confirm terminating this employee?':'تأكيد إنهاء خدمة هذا الموظف؟')) return;
   await sb.from('employees').update({status:'terminated'}).eq('id',id);
+  hrEmployees();
+}
+
+async function reactivate(id){
+  if(!confirm(lang==='en'?'Reinstate this employee as active?':'تأكيد إعادة هذا الموظف إلى الخدمة (نشط)؟')) return;
+  const {error} = await sb.from('employees').update({status:'active'}).eq('id',id);
+  if(error){ alert((lang==='en'?'Error: ':'خطأ: ')+error.message); return; }
   hrEmployees();
 }
 
@@ -1342,6 +1477,11 @@ async function hrEditForm(){
     <label>${t('manager_text')}</label><input id="e_mgrname" value="${esc(emp.manager_name)}">
     <label>${t('manager_email')}</label><input id="e_mgremail" type="email" value="${esc(emp.manager_email)}" placeholder="manager@example.com">
     <label>${t('manager_phone')}</label><input id="e_mgrphone" dir="ltr" value="${esc(emp.manager_phone)}" placeholder="9647701234567">
+    <label>${lang==='en'?'Employment Status':'حالة الموظف'}</label>
+    <select id="e_status">
+      <option value="active" ${emp.status!=='terminated'?'selected':''}>${lang==='en'?'Active':'نشط'}</option>
+      <option value="terminated" ${emp.status==='terminated'?'selected':''}>${lang==='en'?'Terminated':'خارج الخدمة'}</option>
+    </select>
     <label>${t('role_label')}</label><select id="e_role">
       <option value="employee" ${emp.role==='employee'?'selected':''}>${t('role_employee')}</option>
       <option value="manager" ${emp.role==='manager'?'selected':''}>${t('role_manager')}</option>
@@ -1355,7 +1495,15 @@ async function hrEditForm(){
       <button class="ghost" onclick="hrTab('emp')">${t('cancel')}</button>
     </div>
     <div id="e_msg" class="msg"></div>
-  </div>`;
+  </div>
+  <div class="card" id="e_docs"><h2 style="font-size:1rem">📎 ${lang==='en'?'Attachments record':'سجل المرفقات والمستندات'}</h2><div style="opacity:.6;font-size:.85rem">...</div></div>`;
+  const {data: dreqs} = await sb.from('leave_requests').select('id, start_date, end_date, status, attachment_data, attachment_name, leave_types(name_ar,name_en)')
+    .eq('employee_id', editingEmpId).not('attachment_data','is',null).order('requested_at',{ascending:false});
+  const drows = (dreqs||[]).map(r=>`<tr><td>${tn(r.leave_types)}</td><td>${r.start_date} → ${r.end_date}</td><td>${badge(r.status)}</td><td>${esc(r.attachment_name||'')}</td><td>${attLink(r)}</td></tr>`).join('')
+    || `<tr><td colspan="5">${lang==='en'?'No attachments for this employee':'لا توجد مرفقات لهذا الموظف'}</td></tr>`;
+  const de = document.getElementById('e_docs');
+  if(de) de.innerHTML = `<h2 style="font-size:1rem">📎 ${lang==='en'?'Attachments record':'سجل المرفقات والمستندات'}</h2>
+    <table><tr><th>${t('type_col')}</th><th>${lang==='en'?'Period':'الفترة'}</th><th>${lang==='en'?'Status':'الحالة'}</th><th>${lang==='en'?'File':'الملف'}</th><th></th></tr>${drows}</table>`;
 }
 async function saveEdit(){
   const msg = document.getElementById('e_msg'); msg.className='msg err'; msg.textContent='';
@@ -1373,7 +1521,8 @@ async function saveEdit(){
     manager_phone: document.getElementById('e_mgrphone').value.trim() || null,
     email: document.getElementById('e_email').value.trim() || null,
     gender: document.getElementById('e_gender').value || null,
-    role: document.getElementById('e_role').value
+    role: document.getElementById('e_role').value,
+    status: document.getElementById('e_status').value
   };
   if(pin) payload.pin = pin;
   if(!payload.full_name || !payload.emp_code || !payload.hire_date){ msg.textContent = lang==='en' ? 'Name, ID and hire date are required' : 'الاسم والرقم الوظيفي وتاريخ التعيين مطلوبة'; return; }
