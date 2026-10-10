@@ -19,7 +19,7 @@
   *{box-sizing:border-box}
   body{margin:0;background:var(--paper);color:var(--ink);font-family:'Tajawal',Tahoma,sans-serif;
     padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);}
-  .wrap{max-width:800px;margin:0 auto;padding:20px 16px 60px}
+  .wrap{max-width:1100px;margin:0 auto;padding:20px 16px 60px}
   h1{font-size:1.25rem;margin:0 0 2px;font-weight:800;color:var(--blue-d)}
   h2{font-weight:700}
   .sub{color:var(--blue);opacity:.85;margin:0 0 20px;font-size:.88rem}
@@ -64,7 +64,7 @@
   .watermark img{position:absolute;bottom:-60px;left:-60px;width:420px;opacity:.05;transform:rotate(-8deg)}
   .header-band{background:linear-gradient(135deg,var(--blue) 0%,var(--teal) 130%);
     border-radius:0 0 26px 26px;padding:20px 16px 26px;margin:0 -16px 20px;color:#fff;position:relative;z-index:1}
-  .header-band .inner{max-width:800px;margin:0 auto;display:flex;justify-content:space-between;align-items:center}
+  .header-band .inner{max-width:1100px;margin:0 auto;display:flex;justify-content:space-between;align-items:center}
   .header-band img.logo{height:42px;border-radius:8px;background:#fff;padding:3px;display:block}
   .header-band .bt b{color:#fff;font-size:1rem} .header-band .bt span{color:rgba(255,255,255,.85);font-size:.75rem}
   .header-band h1{color:#fff;font-size:1.2rem;margin:0 0 2px}
@@ -819,13 +819,15 @@ async function submitRequest(){
   const {data: type} = await sb.from('leave_types').select('*').eq('id', type_id).single();
   const {data: holidays} = await sb.from('holidays').select('holiday_date');
   const holSet = new Set((holidays||[]).map(h=>h.holiday_date));
+  let excludeFri = false;
+  try{ const {data: fs} = await sb.from('system_settings').select('value').eq('key','exclude_friday').maybeSingle(); excludeFri = !!(fs && fs.value === 'true'); }catch(e){}
 
   let days = 0;
   let d = new Date(start);
   const endD = new Date(end);
   while(d <= endD){
     const iso = d.toISOString().slice(0,10);
-    const isHoliday = holSet.has(iso);
+    const isHoliday = holSet.has(iso) || (excludeFri && d.getUTCDay() === 5);
     if(!(type.counts_holidays === false && isHoliday)) days++;
     d.setDate(d.getDate()+1);
   }
@@ -1016,6 +1018,7 @@ async function renderHR(){
       <button class="${tab==='emp'?'active':''}" onclick="hrTab('emp')">${t('tab_emp')}</button>
       <button class="${tab==='add'?'active':''}" onclick="hrTab('add')">${t('tab_add')}</button>
       <button class="${tab==='notices'?'active':''}" onclick="hrTab('notices')">${t('tab_notices')}</button>
+      <button class="${tab==='holidays'?'active':''}" onclick="hrTab('holidays')">${lang==='en'?'Official Holidays':'العطل الرسمية'}</button>
       <button class="${tab==='settings'?'active':''}" onclick="hrTab('settings')">${t('tab_settings')}</button>
     </div>
     <div id="body">...</div>`;
@@ -1027,6 +1030,7 @@ async function renderHR(){
   if(tab==='me') return hrMe();
   if(tab==='types') return hrTypes();
   if(tab==='reports') return hrReports();
+  if(tab==='holidays') return hrHolidays();
   if(tab==='settings') return hrSettings();
   if(tab==='notices') return hrNotices();
 }
@@ -1079,6 +1083,51 @@ async function deleteNotice(id){
   await sb.from('announcements').delete().eq('id', id);
   hrNotices();
 }
+async function hrHolidays(){
+  const body = document.getElementById('body');
+  const {data: hs, error} = await sb.from('holidays').select('*').order('holiday_date',{ascending:true});
+  const L = lang==='en';
+  const dayName = d => new Date(d+'T00:00:00Z').toLocaleDateString(L?'en-GB':'ar-IQ',{weekday:'long',timeZone:'UTC'});
+  const rows = (hs||[]).map(h=>`<tr><td>${h.holiday_date}</td><td>${dayName(h.holiday_date)}</td><td>${esc(h.name_ar||'')}</td>
+    <td><button class="ghost" onclick="deleteHoliday('${h.id}')">${L?'Delete':'حذف'}</button></td></tr>`).join('')
+    || `<tr><td colspan="4">${L?'No holidays added yet':'لا توجد عطل مضافة بعد'}</td></tr>`;
+  body.innerHTML = `<div class="card accent-gold">
+    <h2 style="font-size:1rem">${L?'Official Holidays':'العطل الرسمية'}</h2>
+    <p style="font-size:.8rem;opacity:.7">${L
+      ? 'Holidays you add here are NOT counted in leave types set to exclude holidays (e.g. annual leave). Add them as soon as the official decree is issued; they only affect requests submitted afterwards.'
+      : 'العطل المضافة هنا لا تُحتسب ضمن أيام أنواع الإجازة المضبوطة على استثناء العطل (مثل الاعتيادية). أضفها فور صدور القرار الرسمي؛ ويسري أثرها على الطلبات المقدّمة بعد إضافتها فقط.'}</p>
+    ${error?`<div class="msg err">${esc(error.message)}</div>`:''}
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end">
+      <div><label>${L?'From date':'من تاريخ'}</label><input type="date" id="hd_from"></div>
+      <div><label>${L?'To date (optional)':'إلى تاريخ (اختياري)'}</label><input type="date" id="hd_to"></div>
+      <div style="flex:1;min-width:160px"><label>${L?'Name':'اسم العطلة'}</label><input id="hd_name" placeholder="${L?'e.g. Eid Al-Fitr':'مثال: عيد الفطر'}"></div>
+      <button onclick="addHoliday()">${L?'Add':'إضافة'}</button>
+    </div>
+    <div id="hd_msg" class="msg"></div>
+  </div>
+  <div class="card"><table><tr><th>${L?'Date':'التاريخ'}</th><th>${L?'Day':'اليوم'}</th><th>${L?'Name':'الاسم'}</th><th></th></tr>${rows}</table></div>`;
+}
+async function addHoliday(){
+  const L = lang==='en';
+  const from = document.getElementById('hd_from').value;
+  const to = document.getElementById('hd_to').value || from;
+  const name = document.getElementById('hd_name').value.trim();
+  const msg = document.getElementById('hd_msg'); msg.className='msg err';
+  if(!from){ msg.textContent = L?'Choose a date':'اختر التاريخ'; return; }
+  if(to < from){ msg.textContent = L?'End date is before start':'تاريخ النهاية قبل البداية'; return; }
+  const list = [];
+  let d = new Date(from+'T00:00:00Z'); const e = new Date(to+'T00:00:00Z');
+  while(d <= e && list.length < 60){ list.push({holiday_date: d.toISOString().slice(0,10), name_ar: name||null}); d.setUTCDate(d.getUTCDate()+1); }
+  const {error} = await sb.from('holidays').upsert(list, {onConflict:'holiday_date'});
+  if(error){ msg.textContent = (L?'Error: ':'خطأ: ')+error.message; return; }
+  hrHolidays();
+}
+async function deleteHoliday(id){
+  if(!confirm(lang==='en'?'Delete this holiday?':'حذف هذه العطلة؟')) return;
+  await sb.from('holidays').delete().eq('id', id);
+  hrHolidays();
+}
+
 async function hrSettings(){
   const body = document.getElementById('body');
   const {data: allT} = await sb.from('leave_types').select('*').order('name_ar');
@@ -1094,6 +1143,11 @@ async function hrSettings(){
       ${lang==='en'?'Enable WhatsApp notify button for employees':'تفعيل زر إشعار واتساب للموظفين'}
     </label>
     <p style="font-size:.8rem;opacity:.7;margin-top:6px">${lang==='en'?'When off, the WhatsApp button is hidden after submitting a request, everywhere in the system.':'عند التعطيل، يختفي زر واتساب بعد تقديم أي طلب إجازة في كل النظام.'}</p>
+    <label style="display:flex;gap:8px;align-items:center;margin-top:14px">
+      <input type="checkbox" id="st_fri" style="width:auto" ${settings.exclude_friday==='true'?'checked':''}>
+      ${lang==='en'?'Do not count Fridays in leave types that exclude holidays (annual leave)':'عدم احتساب يوم الجمعة ضمن أيام الإجازة الاعتيادية'}
+    </label>
+    <p style="font-size:.8rem;opacity:.7;margin-top:6px">${lang==='en'?'Saturday is a working day and is always counted. Applies to requests submitted after saving.':'السبت يوم دوام ويُحتسب دائماً. يسري على الطلبات المقدّمة بعد الحفظ.'}</p>
     <button onclick="saveSettings()">${t('save')}</button>
     <div id="st_msg" class="msg"></div>
   </div>
@@ -1421,6 +1475,10 @@ async function saveSettings(){
   const msg = document.getElementById('st_msg');
   if(error){ msg.className='msg err'; msg.textContent='Error: '+error.message; return; }
   settings.whatsapp_enabled = val;
+  const fri = document.getElementById('st_fri').checked ? 'true' : 'false';
+  const {error: fErr} = await sb.from('system_settings').upsert({key:'exclude_friday', value:fri}, {onConflict:'key'});
+  if(fErr){ msg.className='msg err'; msg.textContent='Error: '+fErr.message; return; }
+  settings.exclude_friday = fri;
   msg.className='msg ok'; msg.textContent = lang==='en'?'Saved':'تم الحفظ';
 }
 
