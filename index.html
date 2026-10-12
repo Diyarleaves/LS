@@ -974,7 +974,7 @@ async function renderManager(){
   subscribeOwnRequestUpdates();
   const body = document.getElementById('body');
   const {data: reqs} = await sb.from('leave_requests')
-    .select('*, employees!leave_requests_employee_id_fkey(full_name, manager_id, manager_name), leave_types(name_ar)')
+    .select('*, employees!leave_requests_employee_id_fkey(full_name, manager_id, manager_name), leave_types(name_ar,unlimited)')
     .eq('status','pending_manager').order('requested_at',{ascending:true});
   const mine = (reqs||[]).filter(r => r.employees && (
     r.employees.manager_id === session.id ||
@@ -982,20 +982,42 @@ async function renderManager(){
   ));
 
   const plM = await photoLookup(mine);
+  // أرصدة أصحاب الطلبات (ليتأكد المدير من كفاية الرصيد قبل الموافقة)
+  const balMap = {};
+  const mIds = [...new Set(mine.map(r=>r.employee_id))];
+  if(mIds.length){
+    const {data: mb} = await sb.from('leave_balances').select('employee_id,leave_type_id,balance').in('employee_id', mIds);
+    (mb||[]).forEach(b=>{ balMap[b.employee_id+'|'+b.leave_type_id] = Number(b.balance); });
+  }
+  const balCells = r=>{
+    if(r.leave_types && r.leave_types.unlimited) return `<td>∞</td><td>—</td>`;
+    const cur = balMap[r.employee_id+'|'+r.leave_type_id];
+    if(cur===undefined) return `<td>—</td><td>—</td>`;
+    const after = cur - Number(r.days_count);
+    const bad = after < 0;
+    return `<td><b>${fmtBal(cur)}</b></td><td style="${bad?'color:#c0392b;font-weight:700':'color:#1a7f4b;font-weight:700'}">${fmtBal(after)}${bad?'<div style="font-size:.7rem">'+(lang==='en'?'Insufficient balance':'الرصيد غير كافٍ')+'</div>':''}</td>`;
+  };
+  const insufficient = r=>{
+    if(r.leave_types && r.leave_types.unlimited) return false;
+    const cur = balMap[r.employee_id+'|'+r.leave_type_id];
+    return cur!==undefined && cur - Number(r.days_count) < 0;
+  };
+  const warnMsg = lang==='en' ? "This employee's balance is NOT sufficient for this request. Approve anyway?" : 'رصيد الموظف غير كافٍ لهذا الطلب. هل تريد الموافقة رغم ذلك؟';
   let rows = mine.map(r=>`<tr>
       <td>${requestPeople(r, plM, {noManager:true})}${r.substitute_name?`<div style="font-size:.7rem;color:var(--green,#1a7f4b)">✓ ${lang==='en'?'Substitute approved':'وافق البديل'}${r.substitute_note?': '+esc(r.substitute_note):''}</div>`:''}</td><td>${r.leave_types.name_ar}</td>
-      <td>${r.start_date} → ${r.end_date}</td><td>${r.days_count}</td>
+      <td>${r.start_date} → ${r.end_date}</td><td>${r.days_count}</td>${balCells(r)}
       <td>${attLink(r)}</td>
       <td style="min-width:160px"><textarea id="note_${r.id}" rows="1" placeholder="${lang==='en'?'Comment (optional)':'تعليق (اختياري)'}" style="width:100%;font-size:.8rem;padding:6px"></textarea></td>
-      <td style="white-space:nowrap"><button onclick="decide('${r.id}','approved')">${lang==='en'?'Approve':'موافقة'}</button>
+      <td style="white-space:nowrap"><button onclick="${insufficient(r)?`if(!confirm(${JSON.stringify(warnMsg).replace(/"/g,'&quot;')}))return;`:''}decide('${r.id}','approved')">${lang==='en'?'Approve':'موافقة'}</button>
           <button class="reject" onclick="decide('${r.id}','rejected')">${lang==='en'?'Reject':'رفض'}</button></td>
     </tr>`).join('') || `<tr><td colspan="7">${lang==='en'?'No requests awaiting approval':'لا توجد طلبات بانتظار الموافقة'}</td></tr>`;
+  rows = rows.replace('colspan="7"','colspan="9"');
 
   const pc = await profileCard();
   const ownPanel = await leaveRequestPanel();
   const sp = await substitutePanel();
   body.innerHTML = pc + sp + ownPanel + `<div class="card"><h2 style="font-size:1rem">${lang==='en'?'Requests awaiting your approval':'طلبات بانتظار موافقتك'}</h2>
-    <table><tr><th>${lang==='en'?'Employee':'الموظف'}</th><th>${t('type_col')}</th><th>${lang==='en'?'Period':'الفترة'}</th><th>${t('days_col')}</th><th>${lang==='en'?'Attachment':'المرفق'}</th><th>${lang==='en'?'Comment':'تعليق'}</th><th></th></tr>${rows}</table></div>`;
+    <table><tr><th>${lang==='en'?'Employee':'الموظف'}</th><th>${t('type_col')}</th><th>${lang==='en'?'Period':'الفترة'}</th><th>${t('days_col')}</th><th>${lang==='en'?'Current balance':'الرصيد الحالي'}</th><th>${lang==='en'?'After approval':'بعد الموافقة'}</th><th>${lang==='en'?'Attachment':'المرفق'}</th><th>${lang==='en'?'Comment':'تعليق'}</th><th></th></tr>${rows}</table></div>`;
 }
 
 async function decide(reqId, decision){
